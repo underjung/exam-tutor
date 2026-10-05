@@ -168,8 +168,13 @@ def upload_source_file(kind, filename, file_bytes):
         raise RuntimeError("영구 파일 저장은 Supabase 연결이 필요합니다.")
     import hashlib
     digest = hashlib.sha256(file_bytes).hexdigest()[:16]
-    safe = Path(filename).name.replace("/", "_")
-    path = f"{kind}/{digest}_{safe}"
+    # Supabase Storage object keys should stay ASCII-safe.
+    # Keep the original filename in the documents table for display, but
+    # store the object itself using only the digest + sanitized extension.
+    ext = Path(filename).suffix.lower()
+    if not ext or not ext.isascii() or not all(ch.isalnum() or ch == "." for ch in ext):
+        ext = ""
+    path = f"{kind}/{digest}{ext}"
     sb = _supabase()
     try:
         sb.storage.from_(STORAGE_BUCKET).upload(
