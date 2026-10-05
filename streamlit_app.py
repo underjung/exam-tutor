@@ -98,7 +98,7 @@ menu = st.sidebar.radio(
 )
 st.sidebar.divider()
 st.sidebar.caption("온라인 DB: " + ("✅ Supabase" if has_supabase() else "🖥️ 로컬 SQLite"))
-st.sidebar.caption("AI 평가: " + ("✅ 연결됨" if has_openai() else "⚪ 미연결"))
+st.sidebar.caption("학습 모드: 🆓 무료 (API 불필요)")
 
 def dashboard():
     st.markdown("""
@@ -211,7 +211,7 @@ def solve_view(default_mode="전체", locked_ids=None):
             if q["question_type"] == "multiple_choice" and q.get("choices"):
                 det = deterministic_mc_grade(q, answer)
 
-            if has_openai() and (reasoning.strip() or det is None or q["question_type"] != "multiple_choice"):
+            if False:  # 무료 모드: 외부 AI 호출 안 함
                 result = ai.grade(q, answer, reasoning, confidence, context)
                 # If the answer key gives an unambiguous MC result, preserve that grade.
                 if det is not None:
@@ -219,7 +219,7 @@ def solve_view(default_mode="전체", locked_ids=None):
                     result["status"] = "correct" if det else "wrong"
             else:
                 if det is True:
-                    result = {"is_correct":True, "status":"correct", "feedback":"정답입니다. AI 연결 시 풀이 과정도 평가합니다."}
+                    result = {"is_correct":True, "status":"correct", "feedback":"정답입니다. 아래 기존 해설과 비교해 복습하세요."}
                 elif det is False:
                     result = {"is_correct":False, "status":"wrong", "feedback":"오답입니다. 기존 해설을 확인하세요."}
                 else:
@@ -305,26 +305,60 @@ def wrong_review():
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+def _free_topic_guess(question_text, topics):
+    """Very lightweight keyword match. Uncertain questions remain unclassified."""
+    text = (question_text or "").lower()
+    aliases = {
+        "시냅스": ["synap", "nmda", "ampa", "mglur", "neurotrans", "snare", "synapt"],
+        "감각수용기": ["receptor", "수용기", "mechanoreceptor", "adaptation"],
+        "오름신경로": ["dorsal column", "spinothalam", "lemniscus", "오름", "상행"],
+        "통증": ["pain", "nocice", "통증", "analges"],
+        "척수반사": ["reflex", "반사", "muscle spindle", "golgi tendon"],
+        "시각자극의 감각과 전달": ["retina", "visual", "photoreceptor", "rhodopsin", "시각"],
+        "시각반사": ["pupillary", "light reflex", "동공", "시각반사"],
+        "청각의 감각과 전달": ["hearing", "auditory", "cochlea", "청각"],
+        "평형감각기관": ["vestib", "semicircular", "평형"],
+        "미각과 후각": ["taste", "olfact", "미각", "후각"],
+        "수면, 각성 및 뇌파": ["sleep", "eeg", "rem", "수면", "뇌파"],
+        "뇌와 척수의 발생": ["alar plate", "basal plate", "neural tube", "발생"],
+        "뇌줄기": ["brainstem", "midbrain", "pons", "medulla", "뇌줄기"],
+        "내림신경로": ["corticospinal", "rubrospinal", "reticulospinal", "내림", "하행"],
+        "Drugs for Epilepsy": ["epilep", "seizure", "ethosux", "retigab", "발작", "간질"],
+        "Opioids": ["opioid", "morphine", "fentanyl", "nalox"],
+        "Anxiolytic and Hypnotic Drugs": ["benzodia", "barbit", "anxiol", "hypnot"],
+        "Antipsychotic drugs": ["antipsych", "schizo", "haloper", "clozap"],
+        "Antidepressants": ["antidepress", "ssri", "snri", "tricyclic", "maoi"],
+        "Anesthetics": ["anesthe", "propofol", "ketamine", "lidocaine"],
+    }
+    best = None
+    best_score = 0
+    for t in topics:
+        title = t["title"]
+        terms = [title.lower()] + aliases.get(title, [])
+        score = sum(1 for term in terms if term and term.lower() in text)
+        if score > best_score:
+            best, best_score = t["id"], score
+    return best
+
+
 def import_page():
     st.title("자료 가져오기")
-    st.info("이제 파일을 먼저 **영구 저장**한 뒤, 별도로 분석합니다. 업로드 완료 후 페이지를 나가도 파일이 남아 있습니다.")
+    st.success("🆓 무료 모드입니다. OpenAI API/결제가 필요 없습니다.")
+    st.caption("이미 Supabase에 올린 파일은 다시 올릴 필요가 없습니다. 정리본은 참고자료로 보관하고, 기출은 저장된 원본에서 바로 문제를 추출합니다.")
 
     if not has_supabase():
         st.error("영구 파일 업로드는 Supabase 연결이 필요합니다.")
         return
 
-    st.subheader("1. 정리본 파일 영구 저장")
+    st.subheader("1. 정리본")
     summaries = st.file_uploader(
         "정리본 PDF / DOCX 여러 개", type=["pdf","docx","txt","md"],
         accept_multiple_files=True, key="summary_multi_up"
     )
-    if summaries and st.button("정리본 파일 업로드", type="primary"):
-        bar = st.progress(0, text="업로드 준비 중")
-        for i, f in enumerate(summaries, 1):
-            bar.progress((i-1)/len(summaries), text=f"업로드 중: {f.name}")
+    if summaries and st.button("정리본 저장", type="primary"):
+        for f in summaries:
             upload_source_file("summary", f.name, f.getvalue())
-            bar.progress(i/len(summaries), text=f"업로드 완료: {f.name}")
-        st.success("정리본 원본을 Supabase에 영구 저장했습니다. 이제 페이지를 나가도 사라지지 않습니다.")
+        st.success("정리본을 저장했습니다.")
         st.rerun()
 
     stored_summaries = list_documents("summary")
@@ -332,108 +366,90 @@ def import_page():
         st.markdown("#### 저장된 정리본")
         for d in stored_summaries:
             size = d.get("size_bytes") or 0
-            status = d.get("status") or ("analyzed" if d.get("content") else "uploaded")
-            st.write(f"• {d['filename']} · {size/1024/1024:.1f} MB · {'✅ 분석 완료' if status == 'analyzed' else '☁️ 업로드 완료 / 분석 전'}")
-
-        if st.button("저장된 정리본 전체 분석 → 통합 단원 순서 만들기"):
-            outlines = []
-            progress = st.progress(0, text="정리본 분석 준비 중")
-            for i, d in enumerate(reversed(stored_summaries), 1):
-                progress.progress((i-1)/len(stored_summaries), text=f"텍스트 추출 중: {d['filename']}")
-                try:
-                    if d.get("storage_path"):
-                        raw = download_source_file(d)
-                        pages = parse_file(d["filename"], raw)
-                        text = pages_to_text(pages)
-                    elif d.get("content"):
-                        text = d["content"]
-                    else:
-                        raise RuntimeError("저장된 원본 또는 추출 텍스트가 없습니다.")
-                    progress.progress((i-.5)/len(stored_summaries), text=f"단원 분석 중: {d['filename']}")
-                    outline = ai.extract_outline(text) if has_openai() else []
-                    update_document_analysis(d["id"], text, "analyzed")
-                    for title in outline:
-                        if title not in outlines:
-                            outlines.append(title)
-                except Exception as e:
-                    mark_document_status(d["id"], "error")
-                    st.error(f"{d['filename']} 분석 실패: {e}")
-                progress.progress(i/len(stored_summaries), text=f"완료: {d['filename']}")
-            if outlines:
-                replace_topic_order(outlines)
-                st.success(f"정리본 분석 완료: {len(outlines)}개 단원 순서를 적용했습니다.")
-                st.rerun()
-            else:
-                st.warning("단원 순서를 만들지 못했습니다. OpenAI API 연결/잔액과 파일의 텍스트 추출 가능 여부를 확인해주세요.")
+            st.write(f"• {d['filename']} · {size/1024/1024:.1f} MB")
+        st.info("단원 순서는 기본 기초신경계 목차를 사용합니다. 시험공부를 바로 시작할 수 있도록 AI 목차 분석은 생략했습니다.")
     else:
-        st.caption("아직 영구 저장된 정리본이 없습니다.")
+        st.caption("저장된 정리본이 없습니다. 정리본 없이도 기출 추출/풀이가 가능합니다.")
 
     with st.expander("현재 단원 순서"):
         st.write("\n".join(f"{x['position']}. {x['title']}" for x in list_topics()))
 
     st.divider()
-    st.subheader("2. 기출/해설 파일 영구 저장")
+    st.subheader("2. 기출/해설")
     exams = st.file_uploader(
         "기출 PDF / DOCX 여러 개", type=["pdf","docx","txt","md"],
         accept_multiple_files=True, key="exam_multi_up"
     )
-    if exams and st.button("기출/해설 파일 업로드", type="primary"):
-        bar = st.progress(0, text="업로드 준비 중")
-        for i, f in enumerate(exams, 1):
-            bar.progress((i-1)/len(exams), text=f"업로드 중: {f.name}")
+    if exams and st.button("기출/해설 저장"):
+        for f in exams:
             upload_source_file("exam", f.name, f.getvalue())
-            bar.progress(i/len(exams), text=f"업로드 완료: {f.name}")
-        st.success("기출/해설 원본을 영구 저장했습니다.")
+        st.success("기출/해설을 저장했습니다.")
         st.rerun()
 
     stored_exams = list_documents("exam")
-    pending = [d for d in stored_exams if (d.get("status") or ("analyzed" if d.get("content") else "uploaded")) != "analyzed"]
-    if stored_exams:
-        st.markdown("#### 저장된 기출/해설")
-        for d in stored_exams:
-            size = d.get("size_bytes") or 0
-            status = d.get("status") or ("analyzed" if d.get("content") else "uploaded")
-            st.write(f"• {d['filename']} · {size/1024/1024:.1f} MB · {'✅ 문제 추출 완료' if status == 'analyzed' else '☁️ 업로드 완료 / 분석 전'}")
+    if not stored_exams:
+        st.caption("저장된 기출/해설이 없습니다.")
+        return
 
-        method = st.radio("추출 방식", ["AI 추출 — 권장", "기본 추출 — API 없이 테스트"], horizontal=True)
-        if pending and st.button(f"분석 전 파일 {len(pending)}개에서 문제 추출", type="primary"):
-            topics = [t["title"] for t in list_topics()]
-            tmap = {t["title"]:t["id"] for t in list_topics()}
-            total = 0
-            bar = st.progress(0, text="문제 추출 준비 중")
-            for fi, d in enumerate(reversed(pending), 1):
-                try:
-                    bar.progress((fi-1)/len(pending), text=f"텍스트 추출 중: {d['filename']}")
-                    raw = download_source_file(d)
-                    pages = parse_file(d["filename"], raw)
-                    text = pages_to_text(pages)
-                    bar.progress((fi-.5)/len(pending), text=f"문제 추출 중: {d['filename']}")
-                    if method.startswith("AI") and has_openai():
-                        if d["filename"].lower().endswith(".pdf") and is_image_pdf(pages):
-                            questions = ai.extract_questions_from_image_pdf(raw, topics)
-                        else:
-                            questions = ai.extract_questions_from_text(chunks_from_pages(pages), topics)
-                    else:
-                        questions = basic_extract(pages)
-                    for q in questions:
-                        q["topic_id"] = tmap.get(q.get("topic", ""))
-                        q["source_file"] = d["filename"]
-                        q.setdefault("source_page", None); q.setdefault("year", ""); q.setdefault("professor", "")
-                        q.setdefault("question_type", "multiple_choice"); q.setdefault("choices", [])
-                        q.setdefault("correct_answer", ""); q.setdefault("explanation", "")
-                        if q.get("question_text", "").strip():
-                            add_question(q); total += 1
+    st.markdown("#### 저장된 기출/해설")
+    for d in stored_exams:
+        size = d.get("size_bytes") or 0
+        st.write(f"• {d['filename']} · {size/1024/1024:.1f} MB")
+
+    st.warning("예전에 '문제 추출 완료'로 잘못 표시된 파일도 아래 버튼으로 다시 추출할 수 있습니다. 원본 PDF를 다시 업로드할 필요는 없습니다.")
+    if st.button(f"저장된 기출 {len(stored_exams)}개 무료 재추출", type="primary"):
+        topics = list_topics()
+        total = 0
+        failed = []
+        bar = st.progress(0, text="무료 문제 추출 준비 중")
+        for fi, d in enumerate(reversed(stored_exams), 1):
+            try:
+                bar.progress((fi-1)/len(stored_exams), text=f"읽는 중: {d['filename']}")
+                raw = download_source_file(d)
+                pages = parse_file(d["filename"], raw)
+                text = pages_to_text(pages)
+                questions = basic_extract(pages)
+                saved = 0
+                # Avoid duplicating questions already stored from the same file.
+                existing_texts = {
+                    q.get("question_text", "").strip()
+                    for q in list_questions()
+                    if q.get("source_file") == d["filename"]
+                }
+                for q in questions:
+                    qtext = q.get("question_text", "").strip()
+                    if not qtext or qtext in existing_texts:
+                        continue
+                    q["topic_id"] = _free_topic_guess(qtext, topics)
+                    q["source_file"] = d["filename"]
+                    q.setdefault("source_page", None)
+                    q.setdefault("year", "")
+                    q.setdefault("professor", "")
+                    q.setdefault("question_type", "multiple_choice")
+                    q.setdefault("choices", [])
+                    q.setdefault("correct_answer", "")
+                    q.setdefault("explanation", "")
+                    add_question(q)
+                    existing_texts.add(qtext)
+                    saved += 1
+                    total += 1
+                if questions:
                     update_document_analysis(d["id"], text, "analyzed")
-                except Exception as e:
+                else:
                     mark_document_status(d["id"], "error")
-                    st.error(f"{d['filename']} 처리 실패: {e}")
-                bar.progress(fi/len(pending), text=f"완료: {d['filename']}")
-            st.success(f"{total}개 문제를 저장했습니다. '문제 관리'에서 확인하세요.")
-            st.rerun()
-        elif not pending:
-            st.success("저장된 기출/해설은 모두 문제 추출이 완료되었습니다.")
-    else:
-        st.caption("아직 영구 저장된 기출/해설이 없습니다.")
+                    failed.append(f"{d['filename']} (텍스트에서 문제 번호를 찾지 못함)")
+            except Exception as e:
+                mark_document_status(d["id"], "error")
+                failed.append(f"{d['filename']} ({e})")
+            bar.progress(fi/len(stored_exams), text=f"처리 완료: {d['filename']}")
+        if total:
+            st.success(f"완료: 새 문제 {total}개를 저장했습니다. 왼쪽 '문제 관리'에서 확인하세요.")
+        else:
+            st.warning("새로 저장된 문제가 없습니다. 이미 저장되어 있거나, 해당 파일이 이미지 스캔 PDF일 수 있습니다.")
+        if failed:
+            with st.expander("추출하지 못한 파일 보기"):
+                st.write("\n".join(f"• {x}" for x in failed))
+        st.rerun()
 
 def question_admin():
     st.title("문제 관리")
@@ -490,7 +506,7 @@ def backup_settings():
     st.title("백업 / 설정")
     st.subheader("연결 상태")
     st.write("**데이터베이스:**", "Supabase — 여러 기기 동기화" if has_supabase() else "로컬 SQLite — 이 기기 테스트용")
-    st.write("**AI:**", "OpenAI API 연결됨" if has_openai() else "미연결")
+    st.write("**학습 모드:**", "무료 모드 — OpenAI API 사용 안 함")
 
     st.subheader("JSON 백업")
     data = export_backup()
