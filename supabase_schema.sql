@@ -55,3 +55,17 @@ alter table public.attempts enable row level security;
 
 -- anon/authenticated에 정책을 만들지 않습니다.
 -- 서버측 service_role은 RLS를 우회합니다.
+
+-- v2: 원본 파일 영구 저장 + 분석 상태 관리
+alter table public.documents add column if not exists storage_path text;
+alter table public.documents add column if not exists size_bytes bigint default 0;
+alter table public.documents add column if not exists status text default 'uploaded';
+alter table public.documents add column if not exists analyzed_at timestamptz;
+create unique index if not exists idx_documents_storage_path
+  on public.documents(storage_path) where storage_path is not null;
+
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('study-files', 'study-files', false, 209715200)
+on conflict (id) do update set file_size_limit = 209715200;
+
+notify pgrst, 'reload schema';

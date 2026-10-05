@@ -9,7 +9,8 @@ from core.database import (
     init_db, list_topics, replace_topic_order, topic_id,
     add_document, list_documents, add_question, update_question, delete_question,
     list_questions, get_question, add_attempt, list_attempts,
-    latest_attempt_map, consecutive_correct, stats, export_backup
+    latest_attempt_map, consecutive_correct, stats, export_backup,
+    upload_source_file, download_source_file, update_document_analysis, mark_document_status
 )
 from core.document_parser import parse_file, pages_to_text, is_image_pdf, chunks_from_pages
 from core.basic_parser import extract_questions as basic_extract
@@ -306,87 +307,133 @@ def wrong_review():
 
 def import_page():
     st.title("자료 가져오기")
-    st.info("처음에는 **정리본 → 단원 순서 저장 → 기출 업로드** 순서가 좋습니다.")
+    st.info("이제 파일을 먼저 **영구 저장**한 뒤, 별도로 분석합니다. 업로드 완료 후 페이지를 나가도 파일이 남아 있습니다.")
 
-    st.subheader("1. 정리본")
-    sf = st.file_uploader("정리본 PDF / DOCX", type=["pdf","docx","txt","md"], key="summary_up")
-    if sf:
-        pages = parse_file(sf.name, sf.getvalue())
-        text = pages_to_text(pages)
-        st.caption(f"{sf.name} · {len(pages)}페이지/블록 · 추출 텍스트 {len(text):,}자")
+    if not has_supabase():
+        st.error("영구 파일 업로드는 Supabase 연결이 필요합니다.")
+        return
 
-        if "outline_for_file" not in st.session_state or st.session_state.outline_for_file != sf.name:
-            with st.spinner("정리본 순서를 분석하는 중..."):
-                outline = ai.extract_outline(text) if has_openai() else []
-            st.session_state.outline_for_file = sf.name
-            st.session_state.outline_draft = "\n".join(outline or [t["title"] for t in list_topics()])
+    st.subheader("1. 정리본 파일 영구 저장")
+    summaries = st.file_uploader(
+        "정리본 PDF / DOCX 여러 개", type=["pdf","docx","txt","md"],
+        accept_multiple_files=True, key="summary_multi_up"
+    )
+    if summaries and st.button("정리본 파일 업로드", type="primary"):
+        bar = st.progress(0, text="업로드 준비 중")
+        for i, f in enumerate(summaries, 1):
+            bar.progress((i-1)/len(summaries), text=f"업로드 중: {f.name}")
+            upload_source_file("summary", f.name, f.getvalue())
+            bar.progress(i/len(summaries), text=f"업로드 완료: {f.name}")
+        st.success("정리본 원본을 Supabase에 영구 저장했습니다. 이제 페이지를 나가도 사라지지 않습니다.")
+        st.rerun()
 
-        draft = st.text_area(
-            "정리본 단원 순서 — 한 줄에 하나씩. 자동 결과를 직접 고쳐도 됩니다.",
-            value=st.session_state.outline_draft, height=360
-        )
-        if st.button("정리본과 단원 순서 저장", type="primary"):
-            titles = [x.strip(" -•\t") for x in draft.splitlines() if x.strip()]
-            add_document("summary", sf.name, text)
-            replace_topic_order(titles)
-            st.success(f"정리본을 저장했고 {len(titles)}개 단원 순서를 적용했습니다.")
-            st.rerun()
+    stored_summaries = list_documents("summary")
+    if stored_summaries:
+        st.markdown("#### 저장된 정리본")
+        for d in stored_summaries:
+            size = d.get("size_bytes") or 0
+            status = d.get("status") or ("analyzed" if d.get("content") else "uploaded")
+            st.write(f"• {d['filename']} · {size/1024/1024:.1f} MB · {'✅ 분석 완료' if status == 'analyzed' else '☁️ 업로드 완료 / 분석 전'}")
+
+        if st.button("저장된 정리본 전체 분석 → 통합 단원 순서 만들기"):
+            outlines = []
+            progress = st.progress(0, text="정리본 분석 준비 중")
+            for i, d in enumerate(reversed(stored_summaries), 1):
+                progress.progress((i-1)/len(stored_summaries), text=f"텍스트 추출 중: {d['filename']}")
+                try:
+                    if d.get("storage_path"):
+                        raw = download_source_file(d)
+                        pages = parse_file(d["filename"], raw)
+                        text = pages_to_text(pages)
+                    elif d.get("content"):
+                        text = d["content"]
+                    else:
+                        raise RuntimeError("저장된 원본 또는 추출 텍스트가 없습니다.")
+                    progress.progress((i-.5)/len(stored_summaries), text=f"단원 분석 중: {d['filename']}")
+                    outline = ai.extract_outline(text) if has_openai() else []
+                    update_document_analysis(d["id"], text, "analyzed")
+                    for title in outline:
+                        if title not in outlines:
+                            outlines.append(title)
+                except Exception as e:
+                    mark_document_status(d["id"], "error")
+                    st.error(f"{d['filename']} 분석 실패: {e}")
+                progress.progress(i/len(stored_summaries), text=f"완료: {d['filename']}")
+            if outlines:
+                replace_topic_order(outlines)
+                st.success(f"정리본 분석 완료: {len(outlines)}개 단원 순서를 적용했습니다.")
+                st.rerun()
+            else:
+                st.warning("단원 순서를 만들지 못했습니다. OpenAI API 연결/잔액과 파일의 텍스트 추출 가능 여부를 확인해주세요.")
+    else:
+        st.caption("아직 영구 저장된 정리본이 없습니다.")
 
     with st.expander("현재 단원 순서"):
         st.write("\n".join(f"{x['position']}. {x['title']}" for x in list_topics()))
 
     st.divider()
-    st.subheader("2. 기출/해설")
+    st.subheader("2. 기출/해설 파일 영구 저장")
     exams = st.file_uploader(
         "기출 PDF / DOCX 여러 개", type=["pdf","docx","txt","md"],
-        accept_multiple_files=True, key="exam_up"
+        accept_multiple_files=True, key="exam_multi_up"
     )
-    method = st.radio(
-        "추출 방식",
-        ["AI 추출 — 권장", "기본 추출 — API 없이 테스트"],
-        horizontal=True
-    )
-    if method.startswith("AI") and not has_openai():
-        st.warning("AI 추출을 쓰려면 OPENAI_API_KEY를 설정해야 합니다.")
+    if exams and st.button("기출/해설 파일 업로드", type="primary"):
+        bar = st.progress(0, text="업로드 준비 중")
+        for i, f in enumerate(exams, 1):
+            bar.progress((i-1)/len(exams), text=f"업로드 중: {f.name}")
+            upload_source_file("exam", f.name, f.getvalue())
+            bar.progress(i/len(exams), text=f"업로드 완료: {f.name}")
+        st.success("기출/해설 원본을 영구 저장했습니다.")
+        st.rerun()
 
-    if exams and st.button("기출문제 추출 및 저장", type="primary"):
-        topics = [t["title"] for t in list_topics()]
-        tmap = {t["title"]:t["id"] for t in list_topics()}
-        total = 0
-        bar = st.progress(0)
-        log = st.empty()
+    stored_exams = list_documents("exam")
+    pending = [d for d in stored_exams if (d.get("status") or ("analyzed" if d.get("content") else "uploaded")) != "analyzed"]
+    if stored_exams:
+        st.markdown("#### 저장된 기출/해설")
+        for d in stored_exams:
+            size = d.get("size_bytes") or 0
+            status = d.get("status") or ("analyzed" if d.get("content") else "uploaded")
+            st.write(f"• {d['filename']} · {size/1024/1024:.1f} MB · {'✅ 문제 추출 완료' if status == 'analyzed' else '☁️ 업로드 완료 / 분석 전'}")
 
-        for fi,f in enumerate(exams,1):
-            log.write(f"처리 중: {f.name}")
-            pages = parse_file(f.name, f.getvalue())
-            text = pages_to_text(pages)
-            add_document("exam", f.name, text)
-
-            if method.startswith("AI") and has_openai():
-                if f.name.lower().endswith(".pdf") and is_image_pdf(pages):
-                    questions = ai.extract_questions_from_image_pdf(f.getvalue(), topics)
-                else:
-                    questions = ai.extract_questions_from_text(chunks_from_pages(pages), topics)
-            else:
-                questions = basic_extract(pages)
-
-            for q in questions:
-                title = q.get("topic","")
-                q["topic_id"] = tmap.get(title)
-                q["source_file"] = f.name
-                q.setdefault("source_page",None)
-                q.setdefault("year","")
-                q.setdefault("professor","")
-                q.setdefault("question_type","multiple_choice")
-                q.setdefault("choices",[])
-                q.setdefault("correct_answer","")
-                q.setdefault("explanation","")
-                if q.get("question_text","").strip():
-                    add_question(q)
-                    total += 1
-
-            bar.progress(fi/len(exams))
-        st.success(f"{total}개 문제를 저장했습니다. '문제 관리'에서 자동 추출 결과를 확인하세요.")
+        method = st.radio("추출 방식", ["AI 추출 — 권장", "기본 추출 — API 없이 테스트"], horizontal=True)
+        if pending and st.button(f"분석 전 파일 {len(pending)}개에서 문제 추출", type="primary"):
+            topics = [t["title"] for t in list_topics()]
+            tmap = {t["title"]:t["id"] for t in list_topics()}
+            total = 0
+            bar = st.progress(0, text="문제 추출 준비 중")
+            for fi, d in enumerate(reversed(pending), 1):
+                try:
+                    bar.progress((fi-1)/len(pending), text=f"텍스트 추출 중: {d['filename']}")
+                    raw = download_source_file(d)
+                    pages = parse_file(d["filename"], raw)
+                    text = pages_to_text(pages)
+                    bar.progress((fi-.5)/len(pending), text=f"문제 추출 중: {d['filename']}")
+                    if method.startswith("AI") and has_openai():
+                        if d["filename"].lower().endswith(".pdf") and is_image_pdf(pages):
+                            questions = ai.extract_questions_from_image_pdf(raw, topics)
+                        else:
+                            questions = ai.extract_questions_from_text(chunks_from_pages(pages), topics)
+                    else:
+                        questions = basic_extract(pages)
+                    for q in questions:
+                        q["topic_id"] = tmap.get(q.get("topic", ""))
+                        q["source_file"] = d["filename"]
+                        q.setdefault("source_page", None); q.setdefault("year", ""); q.setdefault("professor", "")
+                        q.setdefault("question_type", "multiple_choice"); q.setdefault("choices", [])
+                        q.setdefault("correct_answer", ""); q.setdefault("explanation", "")
+                        if q.get("question_text", "").strip():
+                            add_question(q); total += 1
+                    update_document_analysis(d["id"], text, "analyzed")
+                except Exception as e:
+                    mark_document_status(d["id"], "error")
+                    st.error(f"{d['filename']} 처리 실패: {e}")
+                bar.progress(fi/len(pending), text=f"완료: {d['filename']}")
+            st.success(f"{total}개 문제를 저장했습니다. '문제 관리'에서 확인하세요.")
+            st.rerun()
+        elif not pending:
+            st.success("저장된 기출/해설은 모두 문제 추출이 완료되었습니다.")
+    else:
+        st.caption("아직 영구 저장된 기출/해설이 없습니다.")
 
 def question_admin():
     st.title("문제 관리")

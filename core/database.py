@@ -157,6 +157,60 @@ def list_documents(kind=None):
     conn.close()
     return [dict(r) for r in rows]
 
+
+# ---------- persistent file storage (Supabase Storage) ----------
+
+STORAGE_BUCKET = "study-files"
+
+def upload_source_file(kind, filename, file_bytes):
+    """Upload original source bytes to private Supabase Storage and register it."""
+    if not has_supabase():
+        raise RuntimeError("영구 파일 저장은 Supabase 연결이 필요합니다.")
+    import hashlib
+    digest = hashlib.sha256(file_bytes).hexdigest()[:16]
+    safe = Path(filename).name.replace("/", "_")
+    path = f"{kind}/{digest}_{safe}"
+    sb = _supabase()
+    try:
+        sb.storage.from_(STORAGE_BUCKET).upload(
+            path, file_bytes, {"upsert": "true"}
+        )
+    except Exception as e:
+        # Existing object is fine; DB registration below is idempotent by storage_path.
+        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+            raise
+    existing = sb.table("documents").select("*").eq("storage_path", path).execute().data or []
+    if existing:
+        return existing[0]
+    payload = {
+        "kind": kind, "filename": filename, "content": "",
+        "storage_path": path, "size_bytes": len(file_bytes),
+        "status": "uploaded", "created_at": _now()
+    }
+    rows = sb.table("documents").insert(payload).execute().data or []
+    return rows[0] if rows else payload
+
+def download_source_file(doc):
+    if not has_supabase():
+        raise RuntimeError("Supabase 연결이 필요합니다.")
+    path = doc.get("storage_path")
+    if not path:
+        raise RuntimeError("이 자료에는 저장된 원본 파일이 없습니다.")
+    return _supabase().storage.from_(STORAGE_BUCKET).download(path)
+
+def update_document_analysis(doc_id, content, status="analyzed"):
+    payload = {"content": content or "", "status": status, "analyzed_at": _now()}
+    if has_supabase():
+        _supabase().table("documents").update(payload).eq("id", doc_id).execute()
+        return
+    conn = _local()
+    conn.execute("UPDATE documents SET content=? WHERE id=?", (content or "", doc_id))
+    conn.commit(); conn.close()
+
+def mark_document_status(doc_id, status):
+    if has_supabase():
+        _supabase().table("documents").update({"status": status}).eq("id", doc_id).execute()
+
 # ---------- questions ----------
 
 def _normalize_question_row(row):
